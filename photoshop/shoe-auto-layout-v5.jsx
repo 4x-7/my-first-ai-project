@@ -1,13 +1,30 @@
 #target photoshop
 /* Shoe Auto Layout v5 — Photoshop 2021
-   Uses normal Copy/Paste (not Copy Merged) to move the prepared source layer.
-   Goal: 3253x3405 canvas, source centered inside the internal guide rectangle,
-   then attempt classic Content-Aware Fill on the empty area.
+   Optimized background workflow:
+   1) Prepare the subject inside the guide rectangle.
+   2) Build a full-canvas background from the original image, scaled to cover.
+   3) Remove the duplicate subject area from that background with classic Content-Aware Fill.
+   4) Place the prepared subject back on top.
 */
 (function () {
     var W=3253, H=3405;
     function px(v){ return v.as('px'); }
     function s2t(s){ return app.stringIDToTypeID(s); }
+    function fillContentAware(){
+        var d=new ActionDescriptor();
+        d.putEnumerated(charIDToTypeID('Usng'),charIDToTypeID('FlCn'),s2t('contentAware'));
+        d.putUnitDouble(charIDToTypeID('Opct'),charIDToTypeID('#Prc'),100);
+        d.putEnumerated(charIDToTypeID('Md  '),charIDToTypeID('BlnM'),charIDToTypeID('Nrml'));
+        executeAction(charIDToTypeID('Fl  '),d,DialogModes.NO);
+    }
+    function selectRect(l,t,r,b){
+        app.activeDocument.selection.select([
+            [UnitValue(l,'px'),UnitValue(t,'px')],
+            [UnitValue(r,'px'),UnitValue(t,'px')],
+            [UnitValue(r,'px'),UnitValue(b,'px')],
+            [UnitValue(l,'px'),UnitValue(b,'px')]
+        ]);
+    }
     if(app.documents.length<2){ alert('请同时打开：\n1. 参考线 PSD\n2. 要处理的原图'); return; }
 
     var template=null, source=null;
@@ -33,67 +50,84 @@
     var left=ix[0],right=ix[ix.length-1],top=iy[0],bottom=iy[iy.length-1];
     var targetW=right-left,targetH=bottom-top;
 
+    // Prepare subject at guide size.
     app.activeDocument=source;
-    var work=source.duplicate('Shoe_AutoLayout_Source');
+    var work=source.duplicate('Shoe_AutoLayout_SubjectPrep');
     app.activeDocument=work;
     try{ work.flatten(); }catch(e0){}
     var sw=px(work.width),sh=px(work.height);
     var scale=Math.min(targetW/sw,targetH/sh);
     work.resizeImage(UnitValue(sw*scale,'px'),UnitValue(sh*scale,'px'),null,ResampleMethod.PRESERVEDETAILS);
-
-    // Copy the prepared image with ordinary Copy, avoiding the PS 2021 'Copy Merged' issue.
     work.selection.selectAll();
     work.activeLayer.copy();
     work.selection.deselect();
 
+    // Final canvas.
     var out=app.documents.add(W,H,72,'Shoe_AutoLayout_Result',NewDocumentMode.RGB,DocumentFill.TRANSPARENT);
     app.activeDocument=out;
     out.paste();
-    var layer=out.activeLayer;
-    layer.name='Original Image — Guide Area';
-
-    var bounds=layer.bounds;
+    var subject=out.activeLayer;
+    subject.name='Original Image — Guide Area';
+    var bounds=subject.bounds;
     var lw=px(bounds[2])-px(bounds[0]), lh=px(bounds[3])-px(bounds[1]);
     var destLeft=left+(targetW-lw)/2, destTop=top+(targetH-lh)/2;
-    layer.translate(UnitValue(destLeft-px(bounds[0]),'px'),UnitValue(destTop-px(bounds[1]),'px'));
+    subject.translate(UnitValue(destLeft-px(bounds[0]),'px'),UnitValue(destTop-px(bounds[1]),'px'));
 
-    // Add the same guides to the result.
+    // Subject bounds: used only to remove the duplicate subject from the background copy.
+    var sb=subject.bounds;
+    var sx1=px(sb[0]), sy1=px(sb[1]), sx2=px(sb[2]), sy2=px(sb[3]);
+    var pad=Math.max(35,Math.round(Math.max(sx2-sx1,sy2-sy1)*0.025));
+    sx1=Math.max(0,sx1-pad); sy1=Math.max(0,sy1-pad);
+    sx2=Math.min(W,sx2+pad); sy2=Math.min(H,sy2+pad);
+
+    // Build a full-canvas background from the original image.
+    app.activeDocument=source;
+    var bg=source.duplicate('Shoe_AutoLayout_BackgroundPrep');
+    app.activeDocument=bg;
+    try{ bg.flatten(); }catch(e1){}
+    var bw=px(bg.width), bh=px(bg.height);
+    var bgScale=Math.max(W/bw,H/bh);
+    bg.resizeImage(UnitValue(bw*bgScale,'px'),UnitValue(bh*bgScale,'px'),null,ResampleMethod.PRESERVEDETAILS);
+    bg.selection.selectAll();
+    bg.activeLayer.copy();
+    bg.selection.deselect();
+    app.activeDocument=out;
+    out.paste();
+    var background=out.activeLayer;
+    background.name='Background — Expanded';
+    var bb=background.bounds;
+    var bw2=px(bb[2])-px(bb[0]), bh2=px(bb[3])-px(bb[1]);
+    background.translate(UnitValue((W-bw2)/2-px(bb[0]),'px'),UnitValue((H-bh2)/2-px(bb[1]),'px'));
+    background.move(subject,ElementPlacement.PLACEAFTER);
+
+    // Remove the duplicate subject from the background only.
+    app.activeDocument=out;
+    try{
+        selectRect(sx1,sy1,sx2,sy2);
+        fillContentAware();
+        out.selection.deselect();
+    }catch(e2){
+        try{ out.selection.deselect(); }catch(e3){}
+        alert('主体定位已完成，但背景内容识别填充失败。\n主体和背景仍会保留，请检查结果。');
+    }
+
     for(var xi=0;xi<xs.length;xi++) out.guides.add(Direction.VERTICAL,UnitValue(xs[xi],'px'));
     for(var yi=0;yi<ys.length;yi++) out.guides.add(Direction.HORIZONTAL,UnitValue(ys[yi],'px'));
 
-    try{ work.close(SaveOptions.DONOTSAVECHANGES); }catch(e1){}
+    try{ work.close(SaveOptions.DONOTSAVECHANGES); }catch(e4){}
+    try{ bg.close(SaveOptions.DONOTSAVECHANGES); }catch(e5){}
+    try{ subject.move(background,ElementPlacement.PLACEBEFORE); }catch(e6){}
 
-    // Select the transparent area by loading layer transparency, then invert.
+    // Save PSD and PNG automatically.
     try{
-        var ref=new ActionReference();
-        ref.putProperty(s2t('channel'),s2t('selection'));
-        var ref2=new ActionReference();
-        ref2.putEnumerated(s2t('channel'),s2t('channel'),s2t('transparencyEnum'));
-        var desc=new ActionDescriptor();
-        desc.putReference(s2t('null'),ref);
-        desc.putReference(s2t('to'),ref2);
-        executeAction(s2t('set'),desc,DialogModes.NO);
-        out.selection.invert();
-    }catch(e2){
-        alert('主体位置已完成，但无法自动建立背景选择区域。\n请检查 Shoe_AutoLayout_Result 后继续。');
-        return;
-    }
+        var baseFolder=source.path;
+        var psdFile=new File(baseFolder+'/shoe_auto_layout_result.psd');
+        var psdOpt=new PhotoshopSaveOptions(); psdOpt.layers=true;
+        out.saveAs(psdFile,psdOpt,true,Extension.LOWERCASE);
+        var pngFile=new File(baseFolder+'/shoe_auto_layout_result.png');
+        var pngOpt=new PNGSaveOptions();
+        out.saveAs(pngFile,pngOpt,true,Extension.LOWERCASE);
+    }catch(e7){}
 
-    // Classic Content-Aware Fill available in Photoshop 2021.
-    try{
-        var fillDesc=new ActionDescriptor();
-        fillDesc.putEnumerated(charIDToTypeID('Usng'),charIDToTypeID('FlCn'),s2t('contentAware'));
-        fillDesc.putUnitDouble(charIDToTypeID('Opct'),charIDToTypeID('#Prc'),100);
-        fillDesc.putEnumerated(charIDToTypeID('Md  '),charIDToTypeID('BlnM'),charIDToTypeID('Nrml'));
-        executeAction(charIDToTypeID('Fl  '),fillDesc,DialogModes.NO);
-    }catch(e3){
-        alert('主体和 3253×3405 画布已经完成。\n\nPS 2021 的内容识别填充没有被脚本自动执行。\n请在当前文件中：编辑 → 填充 → 内容识别。');
-    }
-    try{ out.selection.deselect(); }catch(e4){}
-    try{
-        var f=new File(source.path+'/shoe_auto_layout_result.psd');
-        var opt=new PhotoshopSaveOptions(); opt.layers=true;
-        out.saveAs(f,opt,true,Extension.LOWERCASE);
-    }catch(e5){}
-    alert('完成！\n画布：3253 × 3405 px\n主体：已放入参考线矩形\n背景：已尝试用 PS 2021 内容识别填充。');
+    alert('完成！\n画布：3253 × 3405 px\n主体：已放入参考线矩形\n背景：已优化，减少重复主体\n同时保存 PSD + PNG。');
 })();
